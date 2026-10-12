@@ -32,10 +32,16 @@
         MIN = minutes, H = hours, D = days, W = weeks, M = months
         Allowed range: 1 minute .. 2 years.
  
-    Authentication (per array, from JSON):
-        "key"      -> native OpenSSH client (ssh.exe) with an identity file
-        "password" -> Posh-SSH module with a credential saved via Export-Clixml:
-                      Get-Credential pureuser | Export-Clixml C:\Scripts\FBSnapshots\flashblade3.cred.xml
+    Authentication (per array, resolved before any work starts):
+        1. SSH key stored locally (sshKeyPath, or ~/.ssh/id_ed25519 | id_ecdsa | id_rsa)
+           -> native OpenSSH client (ssh.exe)
+        2. No local key, but a credentialFile saved via Export-Clixml
+           -> Posh-SSH with that credential
+              Get-Credential pureuser | Export-Clixml C:\Scripts\FBSnapshots\flashblade3.cred.xml
+        3. Neither -> the script prompts for the pureuser password (3 tries per array)
+           -> Posh-SSH (Install-Module Posh-SSH -Scope CurrentUser)
+        authMethod "password" in the JSON skips step 1.
+        Use -NonInteractive for scheduled runs: the script then fails instead of waiting at a prompt.
  
 .PARAMETER ConfigPath
     Path to the JSON configuration file.
@@ -45,6 +51,10 @@
  
 .PARAMETER SkipCleanup
     Only run the snapshot / replicate phase.
+ 
+.PARAMETER NonInteractive
+    Never prompt for a password. An array with no local SSH key and no saved credential
+    causes the run to stop with an error (use this for Task Scheduler).
  
 .EXAMPLE
     .\Invoke-FBSnapshotReplication.ps1 -ConfigPath .\fb-snapshot-config.json -WhatIf
@@ -59,7 +69,8 @@ param(
     [string]$ConfigPath = (Join-Path $PSScriptRoot 'fb-snapshot-config.json'),
  
     [switch]$SkipSnapshots,
-    [switch]$SkipCleanup
+    [switch]$SkipCleanup,
+    [switch]$NonInteractive
 )
  
 Set-StrictMode -Version Latest
@@ -69,6 +80,7 @@ $ErrorActionPreference = 'Stop'
 $script:LogFile      = $null
 $script:ErrorCount   = 0
 $script:SshSessions  = @{}          # Posh-SSH sessions keyed by array name
+$script:AuthInfo     = @{}          # resolved login method keyed by array name
 $script:Settings     = $null
 $script:ArrayTz      = [TimeZoneInfo]::Local
  
@@ -163,6 +175,113 @@ function Get-ConfigValue {
     return $Default
 }
  
+function Test-CanPrompt {
+    <# True when a person can answer a Read-Host prompt in this session. #>
+    if ($NonInteractive) { return $false }
+    if (-not [Environment]::UserInteractive) { return $false }
+    if ([Environment]::GetCommandLineArgs() | Where-Object { $_ -match '^-NonI' }) { return $false }
+    return $true
+}
+ 
+function Find-LocalSshKey {
+    <#
+        Returns the path of the SSH private key to use for an array, or $null when no key is stored locally.
+        Order: sshKeyPath from JSON, then the default OpenSSH key files in the user's .ssh folder.
+    #>
+    param([Parameter(Mandatory)]$Array)
+ 
+    $key = Get-ConfigValue $Array 'sshKeyPath'
+    if ($key) {
+        $key = [Environment]::ExpandEnvironmentVariables($key)
+        if (Test-Path -LiteralPath $key -PathType Leaf) { return $key }
+        Write-Log -Level WARN -Message "[$($Array.name)] sshKeyPath '$key' was not found on this host."
+        return $null
+    }
+ 
+    $sshDir = Join-Path ([Environment]::GetFolderPath('UserProfile')) '.ssh'
+    foreach ($f in 'id_ed25519', 'id_ecdsa', 'id_rsa') {
+        $p = Join-Path $sshDir $f
+        if (Test-Path -LiteralPath $p -PathType Leaf) { return $p }
+    }
+    return $null
+}
+ 
+function New-FBPasswordSession {
+    <# Opens a Posh-SSH session with a password credential. Returns the session or throws. #>
+    param([Parameter(Mandatory)]$Array, [Parameter(Mandatory)][pscredential]$Credential)
+ 
+    if (-not (Get-Module -Name Posh-SSH)) {
+        if (-not (Get-Module -ListAvailable -Name Posh-SSH)) {
+            throw "Password authentication requires the Posh-SSH module. Install it with: Install-Module Posh-SSH -Scope CurrentUser"
+        }
+        Import-Module Posh-SSH -ErrorAction Stop
+    }
+    $connectTimeout = [int](Get-ConfigValue $script:Settings 'sshConnectTimeoutSeconds' 15)
+    New-SSHSession -ComputerName $Array.managementAddress -Credential $Credential `
+                   -AcceptKey -ConnectionTimeout $connectTimeout -ErrorAction Stop
+}
+ 
+function Resolve-FBAuth {
+    <#
+        Decides how to log in to an array before any work starts:
+          * an SSH key stored locally   -> ssh.exe with that key
+          * a saved credentialFile      -> Posh-SSH with that credential
+          * neither                     -> prompt for the pureuser password (up to 3 tries) -> Posh-SSH
+        Password logins are tested immediately so a wrong password is caught up front.
+    #>
+    param([Parameter(Mandatory)]$Array)
+ 
+    $user       = Get-ConfigValue $script:Settings 'sshUser' 'pureuser'
+    $authMethod = (Get-ConfigValue $Array 'authMethod' 'key').ToLowerInvariant()
+ 
+    # 1. SSH key
+    if ($authMethod -eq 'key') {
+        $key = Find-LocalSshKey -Array $Array
+        if ($key) {
+            Write-Log "[$($Array.name)] Using SSH key $key"
+            return [pscustomobject]@{ Mode = 'key'; KeyPath = $key }
+        }
+        Write-Log -Level WARN -Message "[$($Array.name)] No SSH key stored locally; password required for $user@$($Array.managementAddress)."
+    }
+ 
+    # 2. Saved credential file
+    $credFile = Get-ConfigValue $Array 'credentialFile'
+    if ($credFile -and (Test-Path -LiteralPath $credFile -PathType Leaf)) {
+        $cred = Import-Clixml -Path $credFile
+        $cred = New-Object System.Management.Automation.PSCredential($user, $cred.Password)   # always log in as sshUser
+        $script:SshSessions[$Array.name] = New-FBPasswordSession -Array $Array -Credential $cred
+        Write-Log "[$($Array.name)] Logged in with saved credential $credFile"
+        return [pscustomobject]@{ Mode = 'password' }
+    }
+    elseif ($credFile) {
+        Write-Log -Level WARN -Message "[$($Array.name)] credentialFile '$credFile' was not found."
+    }
+ 
+    # 3. Ask the user
+    if (-not (Test-CanPrompt)) {
+        throw "[$($Array.name)] No SSH key or saved credential, and this session cannot prompt for a password (non-interactive)."
+    }
+ 
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        $secure = Read-Host -AsSecureString -Prompt "Enter password for $user@$($Array.managementAddress) ($($Array.name))"
+        if ($null -eq $secure -or $secure.Length -eq 0) {
+            Write-Log -Level WARN -Message "[$($Array.name)] Empty password entered."
+            continue
+        }
+        $cred = New-Object System.Management.Automation.PSCredential($user, $secure)
+        try {
+            $script:SshSessions[$Array.name] = New-FBPasswordSession -Array $Array -Credential $cred
+            Write-Log "[$($Array.name)] Logged in as $user with the entered password."
+            return [pscustomobject]@{ Mode = 'password' }
+        }
+        catch {
+            if ($_.Exception.Message -match 'Posh-SSH') { throw }
+            Write-Log -Level WARN -Message "[$($Array.name)] Login failed (attempt $attempt of 3): $($_.Exception.Message)"
+        }
+    }
+    throw "[$($Array.name)] Could not log in as $user after 3 attempts."
+}
+ 
 function Invoke-FBCommand {
     <#
         Runs a single Purity//FB CLI command on an array.
@@ -176,30 +295,13 @@ function Invoke-FBCommand {
     $user           = Get-ConfigValue $script:Settings 'sshUser' 'pureuser'
     $connectTimeout = [int](Get-ConfigValue $script:Settings 'sshConnectTimeoutSeconds' 15)
     $cmdTimeout     = [int](Get-ConfigValue $script:Settings 'sshCommandTimeoutSeconds' 300)
-    $authMethod     = (Get-ConfigValue $Array 'authMethod' 'key').ToLowerInvariant()
+    $auth           = $script:AuthInfo[$Array.name]
+    if (-not $auth) { throw "[$($Array.name)] Authentication was not resolved for this array." }
  
     Write-Log -Level DEBUG -Message "[$($Array.name)] ssh $user@$($Array.managementAddress) '$Command'"
  
-    if ($authMethod -eq 'password') {
-        # ---------- Posh-SSH ----------
-        if (-not $script:SshSessions.ContainsKey($Array.name)) {
-            if (-not (Get-Module -ListAvailable -Name Posh-SSH)) {
-                throw "authMethod 'password' requires the Posh-SSH module: Install-Module Posh-SSH -Scope CurrentUser"
-            }
-            Import-Module Posh-SSH -ErrorAction Stop
-            $credFile = Get-ConfigValue $Array 'credentialFile'
-            if (-not $credFile -or -not (Test-Path $credFile)) {
-                throw "[$($Array.name)] credentialFile '$credFile' not found."
-            }
-            $cred = Import-Clixml -Path $credFile
-            if ($cred.UserName -ne $user) {
-                # Make sure we always log in as the configured user (pureuser)
-                $cred = New-Object System.Management.Automation.PSCredential($user, $cred.Password)
-            }
-            $session = New-SSHSession -ComputerName $Array.managementAddress -Credential $cred `
-                                      -AcceptKey -ConnectionTimeout $connectTimeout -ErrorAction Stop
-            $script:SshSessions[$Array.name] = $session
-        }
+    if ($auth.Mode -eq 'password') {
+        # ---------- Posh-SSH (saved or prompted password) ----------
         $sess = $script:SshSessions[$Array.name]
         $r    = Invoke-SSHCommand -SessionId $sess.SessionId -Command $Command -TimeOut $cmdTimeout -ErrorAction Stop
         $out  = @($r.Output)
@@ -212,14 +314,11 @@ function Invoke-FBCommand {
             '-o', 'BatchMode=yes',
             '-o', 'StrictHostKeyChecking=accept-new',
             '-o', "ConnectTimeout=$connectTimeout",
-            '-o', 'ServerAliveInterval=30'
+            '-o', 'ServerAliveInterval=30',
+            '-i', $auth.KeyPath,
+            "$user@$($Array.managementAddress)",
+            $Command
         )
-        $key = Get-ConfigValue $Array 'sshKeyPath'
-        if ($key) {
-            if (-not (Test-Path $key)) { throw "[$($Array.name)] sshKeyPath '$key' not found." }
-            $sshArgs += @('-i', $key)
-        }
-        $sshArgs += @("$user@$($Array.managementAddress)", $Command)
  
         $prevEap = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'      # native stderr must not throw in Windows PowerShell 5.1
@@ -352,6 +451,23 @@ Write-Log ("Loaded {0} array(s) and {1} file system(s)." -f $arrays.Count, $fsLi
 #endregion
  
 try {
+    #region ---------- Resolve logins (prompts happen here, before any change is made) ----------
+    $usedArrays = New-Object System.Collections.Generic.List[string]
+    foreach ($fs in $fsList) {
+        if (-not $usedArrays.Contains($fs.SourceArray)) { $usedArrays.Add($fs.SourceArray) }
+        if ($cleanupTargets -and -not $SkipCleanup -and $fs.Replicate -and $arrays.ContainsKey($fs.TargetArray) -and
+            -not $usedArrays.Contains($fs.TargetArray)) { $usedArrays.Add($fs.TargetArray) }
+    }
+    foreach ($name in $usedArrays) {
+        try { $script:AuthInfo[$name] = Resolve-FBAuth -Array $arrays[$name] }
+        catch { Write-Log -Level ERROR -Message $_.Exception.Message }
+    }
+    $unresolved = @($usedArrays | Where-Object { -not $script:AuthInfo.ContainsKey($_) })
+    if ($unresolved.Count -gt 0) {
+        throw "Cannot log in to: $($unresolved -join ', '). No changes were made."
+    }
+    #endregion
+ 
     #region ---------- Phase 1: snapshot + replicate ----------
     if (-not $SkipSnapshots) {
         Write-Log '----- Phase 1: create / send snapshots -----'
@@ -513,6 +629,9 @@ try {
         }
     }
     #endregion
+}
+catch {
+    Write-Log -Level ERROR -Message $_.Exception.Message
 }
 finally {
     Close-FBSessions
