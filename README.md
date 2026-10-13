@@ -43,9 +43,18 @@ Host fb01
 
 After that, run ssh fb01 "purefs list"
 
+Once that is complete, update the json file to match the flashblade and filesystem requirements with your desired retention and replication rules.  Multiple jsons can exist and be run on different days for different retentions, for example.
+
+Running the script could be:
+
+.EXAMPLE
+    .\Invoke-FBSnapshotReplication.ps1 -ConfigPath .\fb-snapshot-config.json 
+    Running the script with base assumptions
+
 .EXAMPLE
     .\Invoke-FBSnapshotReplication.ps1 -ConfigPath .\fb-snapshot-config.json -WhatIf
     Dry run: shows every command that would be sent, changes nothing.
  
 .EXAMPLE
     .\Invoke-FBSnapshotReplication.ps1 -ConfigPath .\fb-snapshot-config.json -Verbose
+    Running the script with verbose logging
