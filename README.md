@@ -40,3 +40,10 @@ Host fb01
     IdentityFile ~/.ssh/fb_rsa
 
 After that, run ssh fb01 "purefs list"
+
+.EXAMPLE
+    .\Invoke-FBSnapshotReplication.ps1 -ConfigPath .\fb-snapshot-config.json -WhatIf
+    Dry run: shows every command that would be sent, changes nothing.
+ 
+.EXAMPLE
+    .\Invoke-FBSnapshotReplication.ps1 -ConfigPath .\fb-snapshot-config.json -Verbose
