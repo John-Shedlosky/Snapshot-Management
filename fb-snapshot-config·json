@@ -1,0 +1,225 @@
+/*
+===============================================================================================
+  fb-snapshot-config.json  -  configuration for Invoke-FBSnapshotReplication.ps1
+===============================================================================================
+  This file is JSON with comments. The script removes this comment block and every
+  // comment before it reads the file, so the comments can stay in place. Other JSON tools
+  may not accept comments (in VS Code, pick the "JSON with Comments" language mode).
+ 
+  General rules
+    - Text values go in double quotes. true / false and numbers do not.
+    - Backslashes in Windows paths must be doubled:  "C:\\Scripts\\FBSnapshots"
+    - Every entry in a list except the last one needs a comma after its closing } brace.
+    - Names (arrays, file systems) must match the FlashBlade exactly, including case.
+    - An optional value can be left out, or set to "" (empty), to use its default.
+    - Comments: start a line with //, or write between a slash-star and a star-slash.
+      Never type a star followed by a slash inside this header: it ends the comment early.
+===============================================================================================
+*/
+{
+  // =========================================================================================
+  //  SETTINGS - options that apply to the whole run
+  // =========================================================================================
+  "settings": {
+ 
+    // sshUser
+    //   The FlashBlade account the script logs in as, on every array.
+    //   The SSH public key (or the password you type / save) must belong to this account.
+    //   Default: "pureuser"
+    "sshUser": "pureuser",
+ 
+    // logDirectory
+    //   Folder where the script writes its log files. One new file is created per run,
+    //   named FBSnapshot_yyyyMMdd_HHmmss.log, and it records every command sent, every
+    //   snapshot kept or deleted, and every error. The folder is created if it is missing.
+    //   The script does not delete old log files.
+    //   Default: a "Logs" folder next to the script.
+    "logDirectory": "C:\\Scripts\\FBSnapshots\\Logs",
+ 
+    // suffixTimestampFormat
+    //   Date/time format (.NET format codes) added to the end of every snapshot suffix.
+    //   The suffix is always:  <retention>-<timestamp>
+    //   The timestamp makes each suffix unique; Purity//FB will not create a snapshot whose
+    //   suffix already exists on that file system.
+    //
+    //   Purity//FB only allows letters, numbers and '-' in a suffix (63 characters max), so
+    //   the script replaces any space, ':' or other character with '-'. With this format:
+    //     "yyyy-MM-dd HH:mm:ss"  ->  suffix 14D-2026-10-13-09-30-00
+    //     snapshot name           ->  filesystem1.14D-2026-10-13-09-30-00
+    //   Codes: yyyy = year, MM = month, dd = day, HH = hour (24h), mm = minute, ss = second.
+    //   Keep seconds (ss) in the format if the script can run more than once a minute.
+    //   Default: "yyyyMMdd-HHmmss"
+    "suffixTimestampFormat": "yyyy-MM-dd HH:mm:ss",
+ 
+    // arrayTimeZone
+    //   The time zone the FlashBlades use for the "Created" column of
+    //   "purefs snapshot list". The script uses it to work out each snapshot's age, so it
+    //   must match the arrays (not necessarily this Windows server). Daylight saving time
+    //   is handled automatically.
+    //   Use a Windows time zone ID, for example:
+    //     "Eastern Standard Time", "Central Standard Time", "Mountain Standard Time",
+    //     "Pacific Standard Time", "UTC"
+    //   Run  Get-TimeZone -ListAvailable  in PowerShell to see every ID.
+    //   Default: the time zone of the Windows server running the script.
+    "arrayTimeZone": "Eastern Standard Time",
+ 
+    // cleanupScope
+    //   Which snapshots the cleanup step is allowed to destroy and eradicate:
+    //     "Configured" - only snapshots of the file systems listed under "filesystems" below
+    //                    (and their replicas on the target arrays). Recommended.
+    //     "All"        - any snapshot on the array that has no policy and whose suffix starts
+    //                    with a retention (e.g. 14D-...), even for file systems not listed here.
+    //   Snapshots created by a snapshot policy are NEVER deleted, whichever value is used.
+    //   Default: "Configured"
+    "cleanupScope": "Configured",
+ 
+    // cleanupTargetArrays
+    //   true  - also clean up the replica snapshots on the target arrays. Replicas are named
+    //           <targetFilesystem>.replica.<suffix>, carry the same retention as the source
+    //           snapshot, and are deleted using the same rules. The script logs in to each
+    //           target array, so every targetArray must also be listed under "arrays".
+    //   false - only clean up the source arrays; replicas on the targets are left alone.
+    //   Default: false
+    "cleanupTargetArrays": true,
+ 
+    // keepLatestSnapshotPerFilesystem
+    //   true  - never delete the newest snapshot of a file system, even if it has passed its
+    //           retention. This keeps the most recent replication base snapshot in place on
+    //           both the source and the target, so the next replication does not have to
+    //           start over. A warning is logged when a snapshot is kept for this reason.
+    //   false - delete every snapshot that has passed its retention.
+    //   Default: true
+    "keepLatestSnapshotPerFilesystem": true,
+ 
+    // sshConnectTimeoutSeconds
+    //   How many seconds to wait for an array to answer the SSH connection before giving up
+    //   on that command. Raise it if the arrays are slow to respond or across a WAN.
+    //   Default: 15
+    "sshConnectTimeoutSeconds": 15,
+ 
+    // sshCommandTimeoutSeconds
+    //   How many seconds to wait for one FlashBlade command to finish. Only used for
+    //   password logins (Posh-SSH); key logins wait until the command finishes.
+    //   Default: 300
+    "sshCommandTimeoutSeconds": 300
+  },
+ 
+  // =========================================================================================
+  //  ARRAYS - every FlashBlade the script logs in to (one { } entry per array)
+  //  Include every source array, and every target array when cleanupTargetArrays is true.
+  // =========================================================================================
+  "arrays": [
+    {
+      // name
+      //   The name used to refer to this array in "sourceArray" and "targetArray" below.
+      //   For an array used as a replication target, use the array connection name exactly
+      //   as shown by  purearray list --connect  on the source array, because the same name
+      //   is passed to  purefs snapshot send --target.
+      //   Each name may appear only once.                                         (Required)
+      "name": "flashblade1",
+ 
+      // managementAddress
+      //   Hostname, fully qualified name or IP address the script connects to with SSH.
+      //   A short hostname (like flashblade1) must resolve in DNS from this Windows server.
+      //                                                                           (Required)
+      "managementAddress": "flashblade1",
+ 
+      // authMethod
+      //   How the script logs in to this array:
+      //     "key"      - use the SSH key in sshKeyPath. If that file is not found on this
+      //                  server, fall back to credentialFile, and if that is not set either,
+      //                  ask for the password when the script runs.
+      //     "password" - skip the key. Use credentialFile, or ask for the password.
+      //   Password logins need the Posh-SSH module:
+      //     Install-Module Posh-SSH -Scope CurrentUser
+      //   When run with -NonInteractive (e.g. from Task Scheduler) the script never asks for a
+      //   password; it stops with an error instead.
+      //   Default: "key"
+      "authMethod": "key",
+ 
+      // sshKeyPath
+      //   Full path to the SSH PRIVATE key file on this Windows server. The matching public
+      //   key must be added to the sshUser (pureuser) account on the FlashBlade.
+      //   The key must be readable by the Windows account that runs the script.
+      //   If left out, the script looks for %USERPROFILE%\.ssh\id_ed25519, id_ecdsa and
+      //   id_rsa, in that order.                                                  (Optional)
+      "sshKeyPath": "C:\\Users\\Administrator\\.ssh\\fb_rsa"
+ 
+      // credentialFile  (not used here; add it if you want a saved password as a fallback)
+      //   Full path to an encrypted, saved password. Create it once, logged in as the same
+      //   Windows user that will run the script:
+      //     Get-Credential pureuser | Export-Clixml C:\Scripts\FBSnapshots\flashblade1.cred.xml
+      //   The file only works for that Windows user on that server.              (Optional)
+      //   Example:  "credentialFile": "C:\\Scripts\\FBSnapshots\\flashblade1.cred.xml"
+    },
+    {
+      // Second array - same fields as above.
+      // flashblade2 is the replication target. It is listed here so the script can log in
+      // and clean up replica snapshots (cleanupTargetArrays = true).
+      "name": "flashblade2",
+      "managementAddress": "flashblade2",
+      "authMethod": "key",
+      "sshKeyPath": "C:\\Users\\Administrator\\.ssh\\fb_rsa"
+    }
+  ],
+ 
+  // =========================================================================================
+  //  FILESYSTEMS - every file system to snapshot (one { } entry per file system)
+  // =========================================================================================
+  "filesystems": [
+    {
+      // name
+      //   The file system name on the source FlashBlade, exactly as shown by  purefs list.
+      //   Letters, numbers, '-' and '_' only.                                     (Required)
+      "name": "filesystem1",
+ 
+      // sourceArray
+      //   The "name" of the array (from the "arrays" section) that holds this file system.
+      //   The snapshot is taken on this array, and its old snapshots are cleaned up here.
+      //   Each file system has exactly one source array.                         (Required)
+      "sourceArray": "flashblade1",
+ 
+      // retention
+      //   How long each snapshot is kept: a number followed by a unit.
+      //     MIN = minutes   e.g. "30MIN"
+      //     H   = hours     e.g. "12H"
+      //     D   = days      e.g. "14D"
+      //     W   = weeks     e.g. "5W"   (5 x 7 days)
+      //     M   = months    e.g. "13M"  (calendar months)
+      //   Allowed range: 1 minute to 2 years (for example "1MIN" up to "24M", "104W" or
+      //   "730D").
+      //   The retention becomes the first part of the snapshot suffix
+      //   (filesystem1.14D-2026-10-13-09-30-00). The cleanup reads it from the suffix,
+      //   and deletes the snapshot once its "Created" time is that old or older.
+      //   Changing the retention here only affects NEW snapshots; existing snapshots keep
+      //   the retention in their own suffix.                                      (Required)
+      "retention": "14D",
+ 
+      // targetArray
+      //   The array to replicate to: the --target value of  purefs snapshot send.
+      //   Must be the array connection name (see "name" under "arrays").
+      //   Required when targetFilesystem is set; ignored when it is not.          (Optional)
+      "targetArray": "flashblade2",
+ 
+      // targetFilesystem
+      //   The replica file system on the target array.
+      //     Set     -> the snapshot is taken AND replicated:
+      //                  purefs snapshot send --suffix <suffix> --target flashblade2 filesystem1
+      //     Not set -> (left out or "") the snapshot is taken locally only, NOT replicated:
+      //                  purefs snapshot create --suffix <suffix> filesystem1
+      //   The file system must already have a replica link to the target array.
+      //   With cleanupTargetArrays = true, replica snapshots of this file system on the
+      //   target are cleaned up too.                                               (Optional)
+      "targetFilesystem": "filesystem1"
+    },
+    {
+      // Second file system - same fields as above.
+      // Kept for 5 weeks and replicated from flashblade1 to flashblade2.
+      "name": "filesystem2",
+      "sourceArray": "flashblade1",
+      "retention": "5W",
+      "targetArray": "flashblade2",
+      "targetFilesystem": "filesystem2"
+    }
+  ]
+}
