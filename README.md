@@ -1,14 +1,15 @@
 1. Generate the key (PowerShell)
 
 New-Item -ItemType Directory -Force "$env:USERPROFILE.ssh" | Out-Null
-ssh-keygen -t rsa -b 4096 -f "$env:USERPROFILE.ssh\fb_rsa" -C "label-for-the-key"
-Get-Content "$env:USERPROFILE.ssh\fb_rsa.pub" | Set-Clipboard
-powershell
 
-2. Log in with your password and upload the key
+ssh-keygen -t rsa -b 4096 -f "$env:USERPROFILE.ssh\fb_rsa" -C "label-for-the-key"
+
+Get-Content "$env:USERPROFILE.ssh\fb_rsa.pub" | Set-Clipboard
+
+
+2. Log in with your password and upload the key on FlashBlade
 
 ssh pureuser@<fb-mgmt-vip-or-fqdn>
-powershell
 
 pureadmin setattr --publickey pureuser
 Enter key: <paste, press Enter>
@@ -16,15 +17,14 @@ pureadmin list --publickey pureuser
 
 Because you're logged in as pureuser, you can also leave off the username. The command then sets the key for the current user. 
 
-3. Lock down the private key file
+3. Lock down the private key file in Powershell
 
 icacls "$env:USERPROFILE.ssh\fb_rsa" /inheritance:r /grant:r "$($env:USERNAME):(R)"
-powershell
+
 
 4. Test and run commands
 ssh -i "$env:USERPROFILE.ssh\fb_rsa" -o BatchMode=yes pureuser@<fb> "purearray list"
 ssh -i "$env:USERPROFILE.ssh\fb_rsa" pureuser@<fb> "purefs list --csv" | ConvertFrom-Csv | Format-Table
-powershell
 
 5. Optional: SSH config shortcut in $env:USERPROFILE.ssh\config
 
