@@ -9,7 +9,7 @@ Get-Content "$env:USERPROFILE.ssh\fb_rsa.pub" | Set-Clipboard
 
 2. Log in with your password and upload the key on FlashBlade
 
-ssh pureuser@<fb-mgmt-vip-or-fqdn>
+ssh pureuser@flashblade-array-name
 
 pureadmin setattr --publickey pureuser
 Enter key: <paste, press Enter>
