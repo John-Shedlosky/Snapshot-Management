@@ -1,3 +1,5 @@
+The steps below are sample steps to create the RSA SSH key on your Powershell client and pushing the public key to the FlashBlade(s).  And at the bottom we have an example of kicking off the Powershell script, "Involk-FBSnapshotReplication.ps1"
+
 1. Generate the key (PowerShell)
 
 New-Item -ItemType Directory -Force "$env:USERPROFILE.ssh" | Out-Null
